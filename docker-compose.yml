@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # ============== POSTGRESQL ==============
+  postgres:
+    image: postgres:15-alpine
+    container_name: futebol_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432" # Usa a porta que você definir no .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - futebol_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============== MONGODB ==============
+  mongodb:
+    image: mongo:7.0
+    container_name: futebol_mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER} # Criamos essa var no .env
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD} # Criamos essa var no .env
+      MONGO_INITDB_DATABASE: ${MONGO_DB}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - futebol_network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  mongo_data:
+
+networks:
+  futebol_network:
+    driver: bridge

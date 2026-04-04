@@ -138,13 +138,19 @@ class Partida(Base):
 
 # FUNÇÃO AUXILIAR: CRIAR TODAS AS TABELAS
 
-def criar_tabelas(engine):
+def criar_tabelas(engine, reset = False):
     """
     Cria todas as tabelas no banco de dados.
-    
+
     Args:
         engine: SQLAlchemy engine conectado ao PostgreSQL
+        reset: Se True, apaga e recria todas as tabelas (padrão: False)
     """
+    if reset:
+        print("Modo RESET: removendo tabelas existentes...")
+        Base.metadata.drop_all(engine)
+        print("Tabelas removidas!")
+
     print("Criando tabelas no PostgreSQL...")
     Base.metadata.create_all(engine)
     print("Tabelas criadas com sucesso!")

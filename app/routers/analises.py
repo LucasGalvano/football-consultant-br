@@ -46,8 +46,9 @@ def artilheiros(
 ):
     partida_ids = None
     if ano:
-        _, partidas = postgres_repo.get_partidas(session, ano=ano, por_pagina=5000)
+        _, partidas = postgres_repo.get_partidas(session, ano=ano, por_pagina=10000)
         partida_ids = [p.id for p in partidas]
+        print(f"DEBUG ano={ano} partida_ids count={len(partida_ids)} exemplo={partida_ids[:3]}")
         if not partida_ids:
             raise HTTPException(status_code=404, detail=f"Nenhuma partida encontrada para o ano {ano}")
 
@@ -70,7 +71,7 @@ def ranking_cartoes(
 
     partida_ids = None
     if ano:
-        _, partidas = postgres_repo.get_partidas(session, ano=ano, por_pagina=5000)
+        _, partidas = postgres_repo.get_partidas(session, ano=ano, por_pagina=10000)
         partida_ids = [p.id for p in partidas]
 
     return cassandra_repo.get_ranking_cartoes(

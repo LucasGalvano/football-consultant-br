@@ -1,24 +1,51 @@
-import { useApi } from '../hooks/useApi'
+import { useState, useEffect } from 'react'
 import { getArtilheiros, getAnosDisponiveis, getRankingCartoes } from '../services/api'
 import { Loading, ErrorAlert, EmptyState } from '../components/Common'
-import { useState } from 'react'
+import { useApi } from '../hooks/useApi'
 
 export default function Artilheiros() {
   const [ano, setAno] = useState(null)
   const [limite, setLimite] = useState(10)
   const [tipoCartao, setTipoCartao] = useState(null)
 
-  const { data: anosData } = useApi(getAnosDisponiveis)
-  const { data: artilheiros, loading: loadingArtilheiros } = useApi(
-    () => getArtilheiros({ ano, limite }),
-    [ano, limite]
-  )
-  const { data: cartoes, loading: loadingCartoes } = useApi(
-    () => getRankingCartoes({ ano, limite, tipo: tipoCartao }),
-    [ano, limite, tipoCartao]
-  )
+  const [artilheiros, setArtilheiros] = useState(null)
+  const [loadingArtilheiros, setLoadingArtilheiros] = useState(true)
+  const [errorArtilheiros, setErrorArtilheiros] = useState(null)
 
+  const [cartoes, setCartoes] = useState(null)
+  const [loadingCartoes, setLoadingCartoes] = useState(true)
+  const [errorCartoes, setErrorCartoes] = useState(null)
+
+  const { data: anosData } = useApi(getAnosDisponiveis)
   const anos = anosData?.anos || []
+
+  // Busca artilheiros sempre que ano ou limite mudar
+  useEffect(() => {
+    let mounted = true
+    setLoadingArtilheiros(true)
+    setErrorArtilheiros(null)
+
+    getArtilheiros({ ano, limite })
+      .then(res => { if (mounted) setArtilheiros(res.data) })
+      .catch(err => { if (mounted) setErrorArtilheiros(err.response?.data?.detail || err.message) })
+      .finally(() => { if (mounted) setLoadingArtilheiros(false) })
+
+    return () => { mounted = false }
+  }, [ano, limite])
+
+  // Busca cartões sempre que ano, limite ou tipoCartao mudar
+  useEffect(() => {
+    let mounted = true
+    setLoadingCartoes(true)
+    setErrorCartoes(null)
+
+    getRankingCartoes({ ano, limite, tipo: tipoCartao })
+      .then(res => { if (mounted) setCartoes(res.data) })
+      .catch(err => { if (mounted) setErrorCartoes(err.response?.data?.detail || err.message) })
+      .finally(() => { if (mounted) setLoadingCartoes(false) })
+
+    return () => { mounted = false }
+  }, [ano, limite, tipoCartao])
 
   return (
     <div className="space-y-8">
@@ -75,10 +102,12 @@ export default function Artilheiros() {
       {/* Artilheiros */}
       {loadingArtilheiros ? (
         <Loading />
+      ) : errorArtilheiros ? (
+        <ErrorAlert message={errorArtilheiros} />
       ) : artilheiros && artilheiros.length > 0 ? (
         <div className="card">
           <h3 className="font-bold text-2xl mb-6 flex items-center gap-2">
-            ⚽ Artilheiros
+            ⚽ Artilheiros {ano ? ano : '(All Time)'}
             <span className="text-sm bg-brasil-yellow text-brasil-green px-2 py-1 rounded">
               {artilheiros.length} jogadores
             </span>
@@ -89,18 +118,14 @@ export default function Artilheiros() {
                 <div className="flex items-center gap-4">
                   <span className="text-2xl font-bold text-brasil-green">{idx + 1}</span>
                   <div>
-                    <p className="font-bold text-lg text-brasil-dark">
-                      {jogador.jogador || jogador.player || 'Jogador Desconhecido'}
-                    </p>
+                    <p className="font-bold text-lg text-brasil-dark">{jogador.atleta}</p>
                     {jogador.clube && (
                       <p className="text-sm text-gray-600">{jogador.clube}</p>
                     )}
                   </div>
                 </div>
                 <div className="text-right">
-                  <p className="text-3xl font-bold text-brasil-yellow">
-                    {jogador.gols || jogador.goals || 0}
-                  </p>
+                  <p className="text-3xl font-bold text-brasil-yellow">{jogador.total_gols ?? 0}</p>
                   <p className="text-xs text-gray-600">gols</p>
                 </div>
               </div>
@@ -114,10 +139,12 @@ export default function Artilheiros() {
       {/* Ranking de Cartões */}
       {loadingCartoes ? (
         <Loading />
+      ) : errorCartoes ? (
+        <ErrorAlert message={errorCartoes} />
       ) : cartoes && cartoes.length > 0 ? (
         <div className="card">
           <h3 className="font-bold text-2xl mb-6 flex items-center gap-2">
-            🟥 Ranking de Cartões
+            🟥 Ranking de Cartões {ano ? ano : '(All Time)'}
             <span className="text-sm bg-yellow-400 text-brasil-dark px-2 py-1 rounded">
               {cartoes.length} jogadores
             </span>
@@ -128,29 +155,22 @@ export default function Artilheiros() {
                 <div className="flex items-center gap-4">
                   <span className="text-2xl font-bold text-gray-700">{idx + 1}</span>
                   <div>
-                    <p className="font-bold text-lg text-brasil-dark">
-                      {jogador.jogador || jogador.player || 'Jogador Desconhecido'}
-                    </p>
+                    <p className="font-bold text-lg text-brasil-dark">{jogador.atleta}</p>
                     {jogador.clube && (
                       <p className="text-sm text-gray-600">{jogador.clube}</p>
                     )}
                   </div>
                 </div>
-                <div className="text-right flex gap-2">
-                  {jogador.cartoes_amarelos > 0 && (
+                <div className="flex gap-2">
+                  {jogador.amarelos > 0 && (
                     <div className="bg-yellow-400 text-black px-3 py-1 rounded font-bold">
-                      {jogador.cartoes_amarelos}🟨
+                      {jogador.amarelos} 🟨
                     </div>
                   )}
-                  {jogador.cartoes_vermelhos > 0 && (
+                  {jogador.vermelhos > 0 && (
                     <div className="bg-red-600 text-white px-3 py-1 rounded font-bold">
-                      {jogador.cartoes_vermelhos}🟥
+                      {jogador.vermelhos} 🟥
                     </div>
-                  )}
-                  {!jogador.cartoes_amarelos && !jogador.cartoes_vermelhos && (
-                    <p className="text-lg font-bold text-gray-500">
-                      {jogador.cartoes || jogador.total || 0} cartões
-                    </p>
                   )}
                 </div>
               </div>

@@ -98,7 +98,7 @@ export default function Confronto() {
             <div className="grid grid-cols-3 gap-4 text-center mb-6">
               <div>
                 <p className="font-bold text-xl text-brasil-green">
-                  {comparacao[`vitorias_${club1?.sigla}`] || 0}
+                  {comparacao[`vitorias_${club1?.sigla}`] ?? 0}
                 </p>
                 <p className="text-sm text-gray-600">Vitórias {club1?.sigla}</p>
               </div>
@@ -110,7 +110,7 @@ export default function Confronto() {
               </div>
               <div>
                 <p className="font-bold text-xl text-red-600">
-                  {comparacao[`vitorias_${club2?.sigla}`] || 0}
+                  {comparacao[`vitorias_${club2?.sigla}`] ?? 0}
                 </p>
                 <p className="text-sm text-gray-600">Vitórias {club2?.sigla}</p>
               </div>
@@ -128,42 +128,24 @@ export default function Confronto() {
               <div className="space-y-3">
                 {comparacao.historico_recente.map((partida, idx) => (
                   <div key={idx} className="p-4 bg-gray-50 rounded-lg">
-                    <p className="text-xs text-gray-500 mb-2">
+                    <p className="text-xs text-gray-500 mb-3 text-center">
                       {new Date(partida.data).toLocaleDateString('pt-BR')}
                     </p>
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold">{partida.mandante}</span>
-                      <span className="bg-brasil-yellow text-brasil-green px-3 py-1 rounded font-bold">
+                    {/* Layout fixo em 3 colunas: mandante | placar | visitante */}
+                    <div className="grid grid-cols-3 items-center gap-2">
+                      <span className="font-bold text-right text-sm leading-tight">
+                        {partida.mandante}
+                      </span>
+                      <span className="bg-brasil-yellow text-brasil-green px-3 py-1 rounded font-bold text-center whitespace-nowrap">
                         {partida.placar}
                       </span>
-                      <span className="font-bold">{partida.visitante}</span>
+                      <span className="font-bold text-left text-sm leading-tight">
+                        {partida.visitante}
+                      </span>
                     </div>
-                    <p className="text-xs text-gray-600 mt-2">📍 {partida.estadio}</p>
+                    <p className="text-xs text-gray-600 mt-2 text-center">📍 {partida.estadio}</p>
                   </div>
                 ))}
-              </div>
-            </div>
-          )}
-
-          {/* Estatísticas Detalhadas */}
-          {comparacao.estatisticas_detalhadas && comparacao.estatisticas_detalhadas.length > 0 && (
-            <div className="card">
-              <h3 className="font-bold text-lg mb-4">📊 Estatísticas Detalhadas</h3>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <tbody>
-                    {comparacao.estatisticas_detalhadas.map((stat, idx) => (
-                      <tr key={idx} className="border-b border-gray-200">
-                        <td className="py-2 font-medium text-gray-600">
-                          {typeof stat === 'object' ? Object.keys(stat)[0] : stat}
-                        </td>
-                        <td className="py-2 text-right">
-                          {typeof stat === 'object' ? Object.values(stat)[0] : 'N/A'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
               </div>
             </div>
           )}

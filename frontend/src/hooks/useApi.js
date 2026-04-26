@@ -1,11 +1,17 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
 export function useApi(apiCall, dependencies = []) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
+  // Serializa as dependências para comparação estável
+  const depsKey = JSON.stringify(dependencies)
+  const depsKeyRef = useRef(depsKey)
+
   useEffect(() => {
+    depsKeyRef.current = depsKey
+
     let mounted = true
 
     const fetchData = async () => {
@@ -32,7 +38,8 @@ export function useApi(apiCall, dependencies = []) {
     return () => {
       mounted = false
     }
-  }, dependencies)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depsKey])
 
   return { data, loading, error }
 }

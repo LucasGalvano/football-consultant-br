@@ -3,7 +3,6 @@ import { useApi } from '../hooks/useApi'
 import { getClassificacao, getAnosDisponiveis } from '../services/api'
 import { Loading, ErrorAlert, EmptyState } from '../components/Common'
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
 
 export default function Classificacao() {
   const { ano } = useParams()
@@ -52,6 +51,7 @@ export default function Classificacao() {
                 <th className="px-4 py-3 text-left font-bold text-brasil-dark">#</th>
                 <th className="px-4 py-3 text-left font-bold text-brasil-dark">Clube</th>
                 <th className="px-4 py-3 text-center font-bold text-brasil-dark">PG</th>
+                <th className="px-4 py-3 text-center font-bold text-brasil-dark">J</th>
                 <th className="px-4 py-3 text-center font-bold text-brasil-dark">V</th>
                 <th className="px-4 py-3 text-center font-bold text-brasil-dark">E</th>
                 <th className="px-4 py-3 text-center font-bold text-brasil-dark">D</th>
@@ -63,31 +63,26 @@ export default function Classificacao() {
             <tbody>
               {classificacao.map((time, idx) => (
                 <tr
-                  key={time.clube_id}
+                  key={time.clube}
                   className={`border-b border-gray-200 ${
-                    idx < 4 ? 'bg-green-50' : idx < 6 ? 'bg-blue-50' : idx < 18 ? 'bg-white' : 'bg-red-50'
+                    idx < 4 ? 'bg-green-50' : idx < 6 ? 'bg-blue-50' : idx >= classificacao.length - 4 ? 'bg-red-50' : 'bg-white'
                   }`}
                 >
-                  <td className="px-4 py-3 font-bold text-brasil-dark">{idx + 1}</td>
-                  <td className="px-4 py-3">
-                    <Link
-                      to={`/clubes/${time.clube_id}`}
-                      className="font-bold text-brasil-green hover:underline"
-                    >
-                      {time.nome_clube}
-                    </Link>
+                  <td className="px-4 py-3 font-bold text-brasil-dark">{time.posicao}</td>
+                  <td className="px-4 py-3 font-bold text-brasil-green">
+                    {time.clube}
                   </td>
-                  <td className="px-4 py-3 text-center font-bold text-2xl text-brasil-dark">
-                    {time.pontos_ganhos}
+                  <td className="px-4 py-3 text-center font-bold text-xl text-brasil-dark">
+                    {time.pontos}
                   </td>
+                  <td className="px-4 py-3 text-center text-gray-700">{time.jogos}</td>
                   <td className="px-4 py-3 text-center text-green-600 font-bold">{time.vitorias}</td>
                   <td className="px-4 py-3 text-center text-gray-600 font-bold">{time.empates}</td>
                   <td className="px-4 py-3 text-center text-red-600 font-bold">{time.derrotas}</td>
-                  <td className="px-4 py-3 text-center font-bold">{time.gols_marcados}</td>
-                  <td className="px-4 py-3 text-center font-bold">{time.gols_sofridos}</td>
+                  <td className="px-4 py-3 text-center font-bold">{time.gols_pro}</td>
+                  <td className="px-4 py-3 text-center font-bold">{time.gols_contra}</td>
                   <td className="px-4 py-3 text-center font-bold">
-                    {time.gols_marcados - time.gols_sofridos > 0 ? '+' : ''}
-                    {time.gols_marcados - time.gols_sofridos}
+                    {time.saldo_gols > 0 ? '+' : ''}{time.saldo_gols}
                   </td>
                 </tr>
               ))}
@@ -112,11 +107,11 @@ export default function Classificacao() {
           </div>
           <div className="flex items-center gap-2">
             <div className="w-4 h-4 bg-white border border-gray-300 rounded"></div>
-            <span>Outros (7-17)</span>
+            <span>Outros</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-4 h-4 bg-red-100 border border-red-500 rounded"></div>
-            <span>Rebaixamento (18-20)</span>
+            <span>Rebaixamento (últimos 4)</span>
           </div>
         </div>
       </div>

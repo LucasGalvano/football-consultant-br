@@ -12,7 +12,7 @@ export default function Estadios() {
 
   const filteredEstadios = estadios?.filter(e =>
     e.nome.toLowerCase().includes(search.toLowerCase()) ||
-    e.cidade.toLowerCase().includes(search.toLowerCase())
+    (e.cidade && e.cidade.toLowerCase().includes(search.toLowerCase()))
   ) || []
 
   return (
@@ -44,19 +44,17 @@ export default function Estadios() {
               </h3>
               <div className="space-y-2 text-sm">
                 <p>
-                  <span className="font-medium text-gray-600">Cidade:</span> {estadio.cidade}
+                  <span className="font-medium text-gray-600">Cidade:</span>{' '}
+                  {estadio.cidade || <span className="text-gray-400 italic">Não informada</span>}
                 </p>
                 <p>
-                  <span className="font-medium text-gray-600">Estado:</span> {estadio.estado}
+                  <span className="font-medium text-gray-600">Estado:</span>{' '}
+                  {estadio.estado || <span className="text-gray-400 italic">Não informado</span>}
                 </p>
                 {estadio.capacidade && (
                   <p>
-                    <span className="font-medium text-gray-600">Capacidade:</span> {estadio.capacidade.toLocaleString()}
-                  </p>
-                )}
-                {estadio.ano_inauguracao && (
-                  <p>
-                    <span className="font-medium text-gray-600">Inaugurado:</span> {estadio.ano_inauguracao}
+                    <span className="font-medium text-gray-600">Capacidade:</span>{' '}
+                    {estadio.capacidade.toLocaleString('pt-BR')}
                   </p>
                 )}
               </div>

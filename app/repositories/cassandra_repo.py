@@ -5,6 +5,33 @@ Camada de acesso a dados para gols e cartões.
 
 from cassandra.cluster import Session as CassandraSession
 from typing import Optional, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
+
+
+# ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+def _buscar_gols_partida(session: CassandraSession, partida_id: int) -> List:
+    rows = session.execute(
+        "SELECT atleta, clube, tipo_gol FROM gols_por_partida WHERE partida_id = %s",
+        (partida_id,),
+    )
+    return list(rows)
+
+
+def _buscar_cartoes_partida(session: CassandraSession, partida_id: int) -> List:
+    rows = session.execute(
+        "SELECT atleta, tipo_cartao, clube FROM cartoes_por_partida WHERE partida_id = %s",
+        (partida_id,),
+    )
+    return list(rows)
+
+
+def _clube_principal(clubes_contagem: dict) -> str:
+    """Retorna o clube onde o atleta teve mais registros no período."""
+    if not clubes_contagem:
+        return ""
+    return max(clubes_contagem, key=clubes_contagem.get)
 
 
 # ─── GOLS ─────────────────────────────────────────────────────────────────────
@@ -23,47 +50,42 @@ def get_artilheiros(
     limite: int = 10,
     partida_ids: Optional[List[int]] = None,
 ) -> List[dict]:
-    """
-    Retorna artilheiros calculando via ALLOW FILTERING ou por lista de partidas.
-    Atenção: query pode ser lenta para grandes volumes.
-    """
+    # atleta -> {total_gols, clubes: {clube: count}}
+    contagem: dict = defaultdict(lambda: {"total_gols": 0, "clubes": defaultdict(int)})
+
     if partida_ids:
-        # Busca gols apenas das partidas do período desejado
-        from collections import Counter
-        contagem: Counter = Counter()
-        clube_atleta: dict = {}
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {
+                executor.submit(_buscar_gols_partida, session, pid): pid
+                for pid in partida_ids
+            }
+            for future in as_completed(futures):
+                try:
+                    for r in future.result():
+                        if r.tipo_gol != "Gol Contra":
+                            contagem[r.atleta]["total_gols"] += 1
+                            contagem[r.atleta]["clubes"][r.clube] += 1
+                except Exception:
+                    pass
+    else:
+        rows = session.execute(
+            "SELECT atleta, clube, tipo_gol FROM gols_por_partida ALLOW FILTERING"
+        )
+        for r in rows:
+            if r.tipo_gol != "Gol Contra":
+                contagem[r.atleta]["total_gols"] += 1
+                contagem[r.atleta]["clubes"][r.clube] += 1
 
-        for pid in partida_ids:
-            rows = session.execute(
-                "SELECT atleta, clube, tipo_gol FROM gols_por_partida WHERE partida_id = %s",
-                (pid,),
-            )
-            for r in rows:
-                if r.tipo_gol != "Gol Contra":  # Não conta gol contra
-                    chave = (r.atleta, r.clube)
-                    contagem[chave] += 1
-
-        resultado = [
-            {"atleta": k[0], "clube": k[1], "total_gols": v}
-            for k, v in contagem.most_common(limite)
-        ]
-        return resultado
-
-    # Sem filtro de partidas — usa ALLOW FILTERING (lento)
-    rows = session.execute(
-        "SELECT atleta, clube, tipo_gol FROM gols_por_partida ALLOW FILTERING LIMIT 50000"
-    )
-    from collections import Counter
-    contagem: Counter = Counter()
-    for r in rows:
-        if r.tipo_gol != "Gol Contra":
-            chave = (r.atleta, r.clube)
-            contagem[chave] += 1
-
-    return [
-        {"atleta": k[0], "clube": k[1], "total_gols": v}
-        for k, v in contagem.most_common(limite)
+    resultado = [
+        {
+            "atleta": atleta,
+            "clube": _clube_principal(dados["clubes"]),
+            "total_gols": dados["total_gols"],
+        }
+        for atleta, dados in contagem.items()
     ]
+    resultado.sort(key=lambda x: -x["total_gols"])
+    return resultado[:limite]
 
 
 def get_gols_clube_partidas(
@@ -71,7 +93,6 @@ def get_gols_clube_partidas(
     clube: str,
     partida_ids: List[int],
 ) -> List[dict]:
-    """Gols de um clube específico em uma lista de partidas."""
     resultado = []
     for pid in partida_ids:
         rows = session.execute(
@@ -100,41 +121,42 @@ def get_ranking_cartoes(
     session: CassandraSession,
     limite: int = 10,
     partida_ids: Optional[List[int]] = None,
-    tipo: Optional[str] = None,  # "Amarelo" | "Vermelho" | None
+    tipo: Optional[str] = None,
 ) -> List[dict]:
-    from collections import defaultdict
+    # atleta -> {amarelos, vermelhos, clubes: {clube: count}}
+    contagem: dict = defaultdict(lambda: {"amarelos": 0, "vermelhos": 0, "clubes": defaultdict(int)})
 
-    contagem: dict = defaultdict(lambda: {"amarelos": 0, "vermelhos": 0, "clube": ""})
-
-    ids_para_buscar = partida_ids or []
-    if not ids_para_buscar:
+    if partida_ids:
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {
+                executor.submit(_buscar_cartoes_partida, session, pid): pid
+                for pid in partida_ids
+            }
+            for future in as_completed(futures):
+                try:
+                    for r in future.result():
+                        contagem[r.atleta]["clubes"][r.clube] += 1
+                        if r.tipo_cartao == "Amarelo":
+                            contagem[r.atleta]["amarelos"] += 1
+                        elif r.tipo_cartao == "Vermelho":
+                            contagem[r.atleta]["vermelhos"] += 1
+                except Exception:
+                    pass
+    else:
         rows = session.execute(
-            "SELECT partida_id, atleta, tipo_cartao, clube "
-            "FROM cartoes_por_partida ALLOW FILTERING LIMIT 100000"
+            "SELECT atleta, tipo_cartao, clube FROM cartoes_por_partida ALLOW FILTERING"
         )
         for r in rows:
-            contagem[r.atleta]["clube"] = r.clube
+            contagem[r.atleta]["clubes"][r.clube] += 1
             if r.tipo_cartao == "Amarelo":
                 contagem[r.atleta]["amarelos"] += 1
             elif r.tipo_cartao == "Vermelho":
                 contagem[r.atleta]["vermelhos"] += 1
-    else:
-        for pid in ids_para_buscar:
-            rows = session.execute(
-                "SELECT atleta, tipo_cartao, clube FROM cartoes_por_partida WHERE partida_id = %s",
-                (pid,),
-            )
-            for r in rows:
-                contagem[r.atleta]["clube"] = r.clube
-                if r.tipo_cartao == "Amarelo":
-                    contagem[r.atleta]["amarelos"] += 1
-                elif r.tipo_cartao == "Vermelho":
-                    contagem[r.atleta]["vermelhos"] += 1
 
     resultado = [
         {
             "atleta": atleta,
-            "clube": dados["clube"],
+            "clube": _clube_principal(dados["clubes"]),
             "amarelos": dados["amarelos"],
             "vermelhos": dados["vermelhos"],
             "total_cartoes": dados["amarelos"] + dados["vermelhos"],

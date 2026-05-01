@@ -20,10 +20,9 @@ export default function Clubes() {
     <div className="space-y-6">
       <div className="brasil-gradient text-white rounded-xl p-8">
         <h1 className="text-4xl font-bold mb-2">🏆 Clubes Brasileiros</h1>
-        <p className="text-gray-100">Explore todos os clubes que participaram do Campeonato Brasileiro (2014-2023)</p>
+        <p className="text-gray-100">Explore todos os clubes que participaram do Campeonato Brasileiro (2014-2024)</p>
       </div>
 
-      {/* Busca */}
       <div>
         <input
           type="text"
@@ -35,15 +34,10 @@ export default function Clubes() {
         <p className="text-sm text-gray-600 mt-2">{filteredClubes.length} clube(s) encontrado(s)</p>
       </div>
 
-      {/* Grid de Clubes */}
       {filteredClubes.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {filteredClubes.map(clube => (
-            <Link
-              key={clube.id}
-              to={`/clubes/${clube.id}`}
-              className="card group"
-            >
+            <Link key={clube.id} to={`/clubes/${clube.id}`} className="card group">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-lg font-bold text-brasil-dark group-hover:text-brasil-green">
                   {clube.nome_oficial}
@@ -53,13 +47,10 @@ export default function Clubes() {
                 </span>
               </div>
               <div className="space-y-1 text-sm text-gray-600">
-                <p><span className="font-medium">Estado:</span> {clube.estado}</p>
+                <p><span className="font-medium">Estado:</span> {clube.estado || 'N/A'}</p>
                 <p><span className="font-medium">Fundado:</span> {clube.ano_fundacao || 'N/A'}</p>
-                {clube.estadia_id && (
-                  <p><span className="font-medium">ID:</span> {clube.id}</p>
-                )}
               </div>
-              <div className="mt-4 text-brasil-green font-bold hover:text-brasil-dark">
+              <div className="mt-4 text-brasil-green font-bold group-hover:text-brasil-dark">
                 Ver detalhes →
               </div>
             </Link>

@@ -93,33 +93,39 @@ export default function Partidas() {
         <ErrorAlert message={error} />
       ) : partidas.length > 0 ? (
         <>
-          <div className="space-y-4">
+          <div className="space-y-3">
             {partidas.map(partida => (
               <Link
                 key={partida.id}
                 to={`/partidas/${partida.id}`}
-                className="card group hover:border-brasil-green border-2 border-transparent"
+                className="card block hover:border-brasil-green border-2 border-transparent"
               >
-                <div className="flex flex-col md:flex-row items-start md:items-center justify-between">
-                  <div className="flex-1">
-                    <div className="text-sm text-gray-500 mb-1">
-                      Rodada {partida.rodada} • {new Date(partida.data).toLocaleDateString('pt-BR')}
-                      {partida.hora && ` às ${partida.hora}`}
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <span className="font-bold text-brasil-dark">{partida.mandante}</span>
-                      <span className="bg-brasil-yellow text-brasil-green px-3 py-1 rounded-lg font-bold text-lg">
-                        {partida.placar_mandante}×{partida.placar_visitante}
-                      </span>
-                      <span className="font-bold text-brasil-dark">{partida.visitante}</span>
-                    </div>
-                    <p className="text-sm text-gray-500 mt-2">📍 {partida.estadio}</p>
-                  </div>
+                {/* Linha de meta info */}
+                <p className="text-xs text-gray-500 mb-2">
+                  Rodada {partida.rodada} • {new Date(partida.data).toLocaleDateString('pt-BR')}
+                  {partida.hora && ` às ${partida.hora}`}
+                </p>
+
+                {/* Placar — grid fixo para ficar sempre alinhado */}
+                <div className="grid grid-cols-3 items-center gap-2">
+                  <span className="font-bold text-brasil-dark text-right text-sm leading-tight truncate">
+                    {partida.mandante}
+                  </span>
+                  <span className="bg-brasil-yellow text-brasil-green px-3 py-1 rounded-lg font-bold text-lg text-center whitespace-nowrap">
+                    {partida.placar_mandante}×{partida.placar_visitante}
+                  </span>
+                  <span className="font-bold text-brasil-dark text-left text-sm leading-tight truncate">
+                    {partida.visitante}
+                  </span>
+                </div>
+
+                {/* Rodapé do card */}
+                <div className="flex items-center justify-between mt-2">
+                  <p className="text-xs text-gray-500 truncate">📍 {partida.estadio}</p>
                   {partida.vencedor && (
-                    <div className="mt-2 md:mt-0 text-right">
-                      <p className="text-xs text-gray-600">Vencedor</p>
-                      <p className="font-bold text-brasil-green">{partida.vencedor}</p>
-                    </div>
+                    <p className="text-xs text-brasil-green font-bold ml-2 whitespace-nowrap">
+                      ✓ {partida.vencedor}
+                    </p>
                   )}
                 </div>
               </Link>

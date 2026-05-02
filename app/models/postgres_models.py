@@ -30,6 +30,7 @@ class Clube(Base):
     nome_oficial = Column(String(100), unique=True, nullable=False, index=True)
     sigla = Column(String(10), nullable=True)
     estado = Column(CHAR(2), nullable=True)
+    ano_fundacao = Column(Integer, nullable=True)
     
     # Relacionamentos (back_populates)
     partidas_mandante = relationship(

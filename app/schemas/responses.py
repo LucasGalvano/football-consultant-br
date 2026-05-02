@@ -10,6 +10,7 @@ class ClubeOut(BaseModel):
     nome_oficial: str
     sigla: Optional[str]
     estado: Optional[str]
+    ano_fundacao: Optional[int] = None
 
     class Config:
         from_attributes = True

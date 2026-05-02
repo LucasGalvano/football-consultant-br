@@ -8,6 +8,32 @@ from sqlalchemy import func, desc, asc, and_, or_, extract
 from typing import Optional, List, Tuple
 from app.models.postgres_models import Clube, Estadio, Partida
 
+# Mapeamento fixo de temporada → range de IDs
+# Necessário porque 2020 foi interrompido pela pandemia e terminou em 2021,
+# causando sobreposição de datas entre as temporadas 2020 e 2021.
+TEMPORADAS = {
+    2014: (4607,  4986),
+    2015: (4987,  5366),
+    2016: (5367,  5745),
+    2017: (5746,  6125),
+    2018: (6126,  6505),
+    2019: (6506,  6885),
+    2020: (6886,  7265),  # terminou em fev/2021 (pandemia) — rodadas 1-38
+    2021: (7266,  7645),  # começou em mai/2021 — rodadas 1-38
+    2022: (7646,  8025),
+    2023: (8026,  8405),
+    2024: (8406,  8785),
+}
+
+
+def _filtrar_por_temporada(q, ano: int):
+    """Filtra query pelo range de IDs da temporada, não pela data."""
+    if ano in TEMPORADAS:
+        id_min, id_max = TEMPORADAS[ano]
+        return q.filter(Partida.id >= id_min, Partida.id <= id_max)
+    # Fallback: filtra por data (anos não mapeados)
+    return q.filter(extract("year", Partida.data) == ano)
+
 
 # ─── CLUBES ───────────────────────────────────────────────────────────────────
 
@@ -58,7 +84,7 @@ def get_partidas(
     )
 
     if ano:
-        q = q.filter(extract("year", Partida.data) == ano)
+        q = _filtrar_por_temporada(q, ano)
     if rodada:
         q = q.filter(Partida.rodada == rodada)
     if clube_id:
@@ -91,15 +117,15 @@ def get_partida_by_id(session: Session, partida_id: int) -> Optional[Partida]:
 
 def get_classificacao(session: Session, ano: int) -> List[dict]:
     """
-    Calcula a classificação do campeonato para um determinado ano.
-    Retorna lista ordenada por pontos, saldo de gols e gols pró.
+    Calcula a classificação do campeonato para uma temporada.
+    Usa range de IDs em vez de ano da data para evitar problemas
+    com temporadas que cruzaram anos (ex: 2020 pandemia).
     """
-    partidas = (
+    q = (
         session.query(Partida)
         .options(joinedload(Partida.mandante), joinedload(Partida.visitante))
-        .filter(extract("year", Partida.data) == ano)
-        .all()
     )
+    partidas = _filtrar_por_temporada(q, ano).all()
 
     tabela: dict[str, dict] = {}
 
@@ -150,10 +176,12 @@ def get_classificacao(session: Session, ano: int) -> List[dict]:
 # ─── ANOS DISPONÍVEIS ─────────────────────────────────────────────────────────
 
 def get_anos_disponiveis(session: Session) -> List[int]:
-    rows = (
-        session.query(extract("year", Partida.data).label("ano"))
-        .distinct()
-        .order_by(desc("ano"))
-        .all()
-    )
-    return [int(r.ano) for r in rows]
+    """Retorna os anos das temporadas conhecidas que têm partidas no banco."""
+    anos = []
+    for ano, (id_min, id_max) in sorted(TEMPORADAS.items(), reverse=True):
+        existe = session.query(Partida).filter(
+            Partida.id >= id_min, Partida.id <= id_max
+        ).first()
+        if existe:
+            anos.append(ano)
+    return anos

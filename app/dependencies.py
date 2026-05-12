@@ -1,30 +1,39 @@
 """
-Dependências FastAPI
-Provê sessões/conexões de banco via injeção de dependência.
+Dependências FastAPI — injeção de conexões via Depends().
 
 CORREÇÕES:
-- get_mongo_collection agora chama database.get_mongo_collection() que
-  garante criação do índice em partida_id.
-- Cassandra singleton com lock para ambientes multi-thread.
+- get_mongo_collection chama database.get_mongo_collection() que
+  garante o índice único em partida_id.
+- Cassandra singleton com threading.Lock para segurança em
+  ambientes multi-worker (Gunicorn).
+- get_postgres_session faz rollback automático em caso de exceção.
 """
 
 import threading
 from sqlalchemy.orm import sessionmaker, Session
 from pymongo.collection import Collection
 
-from app.config.database import get_postgres_engine, get_mongo_collection as _get_col, get_astra_session
+from app.config.database import (
+    get_postgres_engine,
+    get_mongo_collection as _db_get_col,
+    get_astra_session,
+)
 
 
-# ─── PostgreSQL ────────────────────────────────────────────────────────────────
-
-def _get_session_factory():
-    # get_postgres_engine já é @lru_cache — sem custo extra chamar aqui
-    return sessionmaker(bind=get_postgres_engine(), autocommit=False, autoflush=False)
-
+# ────────────────────────────────────────────────────────────
+# POSTGRESQL
+# ────────────────────────────────────────────────────────────
 
 def get_postgres_session() -> Session:
-    """Generator que entrega e fecha a sessão ao final do request."""
-    SessionLocal = _get_session_factory()
+    """
+    Generator que entrega a sessão SQLAlchemy e garante fechamento
+    ao final de cada request, com rollback em caso de erro.
+    """
+    SessionLocal = sessionmaker(
+        bind=get_postgres_engine(),
+        autocommit=False,
+        autoflush=False,
+    )
     session = SessionLocal()
     try:
         yield session
@@ -35,18 +44,22 @@ def get_postgres_session() -> Session:
         session.close()
 
 
-# ─── MongoDB ───────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
+# MONGODB
+# ────────────────────────────────────────────────────────────
 
 def get_mongo_collection() -> Collection:
     """
-    Retorna a collection partidas_estatisticas com índice garantido.
-    BUG CORRIGIDO: antes retornava db["partidas_estatisticas"] diretamente,
-    sem criar o índice em partida_id.
+    Retorna a collection partidas_estatisticas.
+    O índice único em partida_id é criado automaticamente (no-op
+    se já existir) pela função de banco.
     """
-    return _get_col("partidas_estatisticas")
+    return _db_get_col("partidas_estatisticas")
 
 
-# ─── Cassandra ─────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
+# CASSANDRA
+# ────────────────────────────────────────────────────────────
 
 _cassandra_session = None
 _cassandra_lock = threading.Lock()
@@ -55,11 +68,12 @@ _cassandra_lock = threading.Lock()
 def get_cassandra_session():
     """
     Singleton thread-safe para a sessão Cassandra.
-    Usa lock para evitar criação dupla em ambientes multi-threaded (Gunicorn).
+    Double-checked locking evita criação duplicada em ambientes
+    com múltiplas threads (Gunicorn workers).
     """
     global _cassandra_session
     if _cassandra_session is None:
         with _cassandra_lock:
-            if _cassandra_session is None:          # double-checked locking
+            if _cassandra_session is None:
                 _cassandra_session = get_astra_session()
     return _cassandra_session

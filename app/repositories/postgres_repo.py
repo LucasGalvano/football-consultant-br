@@ -1,42 +1,62 @@
 """
 Repository PostgreSQL
-Camada de acesso a dados para clubes, estádios e partidas.
-Implementa CRUD completo nas 3 entidades.
+CRUD completo para Clube, Estádio e Partida.
+
+NOVIDADES:
+- create/update/delete para as 3 entidades
+- TEMPORADAS agora inclui 2026 (IDs >= 9000)
+- _proximo_id_partida gera IDs fora dos ranges do CSV (>= 9000)
+- vencedor_id calculado automaticamente pelo placar
+- delete verifica integridade referencial antes de remover
 """
 
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import or_, extract
+from sqlalchemy import or_, extract, func
 from typing import Optional, List, Tuple
 
 from app.models.postgres_models import Clube, Estadio, Partida
-from app.schemas.inputs import ClubeCreate, ClubeUpdate, EstadioCreate, EstadioUpdate, PartidaCreate, PartidaUpdate
+from app.schemas.inputs import (
+    ClubeCreate, ClubeUpdate,
+    EstadioCreate, EstadioUpdate,
+    PartidaCreate, PartidaUpdate,
+)
 
-# Mapeamento fixo de temporada → range de IDs
-# Necessário porque 2020 foi interrompido pela pandemia e terminou em 2021,
-# causando sobreposição de datas entre as temporadas 2020 e 2021.
+
+# ════════════════════════════════════════════════════════
+# TEMPORADAS
+# Mapeia ano → range de IDs das partidas no CSV.
+# IDs >= 9000 são partidas criadas manualmente via API.
+# 2026 começa em 9000 e tem espaço para 380 partidas (38 rodadas × 10).
+# ════════════════════════════════════════════════════════
+
 TEMPORADAS = {
-    2014: (4607,  4986),
-    2015: (4987,  5366),
-    2016: (5367,  5745),
-    2017: (5746,  6125),
-    2018: (6126,  6505),
-    2019: (6506,  6885),
-    2020: (6886,  7265),
-    2021: (7266,  7645),
-    2022: (7646,  8025),
-    2023: (8026,  8405),
-    2024: (8406,  8785),
+    2014: (4607, 4986),
+    2015: (4987, 5366),
+    2016: (5367, 5745),
+    2017: (5746, 6125),
+    2018: (6126, 6505),
+    2019: (6506, 6885),
+    2020: (6886, 7265),   # terminou em fev/2021 (pandemia)
+    2021: (7266, 7645),   # começou em mai/2021
+    2022: (7646, 8025),
+    2023: (8026, 8405),
+    2024: (8406, 8785),
+    2026: (9000, 9379),   # partidas criadas via API a partir de 2026
 }
 
 
-def _filtrar_por_temporada(q, ano: int):
+def _filtrar_por_temporada(query, ano: int):
+    """Filtra query pelo range de IDs da temporada."""
     if ano in TEMPORADAS:
         id_min, id_max = TEMPORADAS[ano]
-        return q.filter(Partida.id >= id_min, Partida.id <= id_max)
-    return q.filter(extract("year", Partida.data) == ano)
+        return query.filter(Partida.id >= id_min, Partida.id <= id_max)
+    # Fallback para anos não mapeados: filtra pela data
+    return query.filter(extract("year", Partida.data) == ano)
 
 
-# ─── CLUBES — READ ────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+# CLUBES — READ
+# ════════════════════════════════════════════════════════
 
 def get_all_clubes(session: Session) -> List[Clube]:
     return session.query(Clube).order_by(Clube.nome_oficial).all()
@@ -52,18 +72,25 @@ def get_clube_by_nome(session: Session, nome: str) -> Optional[Clube]:
     ).first()
 
 
-# ─── CLUBES — WRITE ───────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+# CLUBES — WRITE
+# ════════════════════════════════════════════════════════
 
 def create_clube(session: Session, dados: ClubeCreate) -> Clube:
     """
     Cria um novo clube.
     Levanta ValueError se já existir clube com o mesmo nome_oficial.
+
+    Uso típico: adicionar clube recém-promovido à Série A.
     """
     existente = session.query(Clube).filter(
         Clube.nome_oficial == dados.nome_oficial
     ).first()
     if existente:
-        raise ValueError(f"Já existe um clube com nome '{dados.nome_oficial}' (id={existente.id})")
+        raise ValueError(
+            f"Já existe um clube com nome '{dados.nome_oficial}' "
+            f"(id={existente.id}). Use PUT /{existente.id} para atualizar."
+        )
 
     clube = Clube(**dados.model_dump())
     session.add(clube)
@@ -72,16 +99,18 @@ def create_clube(session: Session, dados: ClubeCreate) -> Clube:
     return clube
 
 
-def update_clube(session: Session, clube_id: int, dados: ClubeUpdate) -> Optional[Clube]:
+def update_clube(
+    session: Session, clube_id: int, dados: ClubeUpdate
+) -> Optional[Clube]:
     """
-    Atualiza campos informados de um clube (PATCH semântico via PUT).
+    Atualiza campos de um clube.
+    Apenas os campos enviados (não-None) são alterados.
     Retorna None se o clube não existir.
     """
     clube = get_clube_by_id(session, clube_id)
     if not clube:
         return None
 
-    # Aplica apenas campos explicitamente enviados (não-None)
     for campo, valor in dados.model_dump(exclude_none=True).items():
         setattr(clube, campo, valor)
 
@@ -93,14 +122,14 @@ def update_clube(session: Session, clube_id: int, dados: ClubeUpdate) -> Optiona
 def delete_clube(session: Session, clube_id: int) -> bool:
     """
     Remove um clube.
-    Retorna False se não existir, levanta ValueError se tiver partidas vinculadas.
+    Retorna False se não existir.
+    Levanta ValueError se tiver partidas vinculadas — protege integridade.
     """
     clube = get_clube_by_id(session, clube_id)
     if not clube:
         return False
 
-    # Verifica integridade referencial manualmente para mensagem clara
-    partidas_vinculadas = session.query(Partida).filter(
+    vinculadas = session.query(Partida).filter(
         or_(
             Partida.mandante_id == clube_id,
             Partida.visitante_id == clube_id,
@@ -108,10 +137,10 @@ def delete_clube(session: Session, clube_id: int) -> bool:
         )
     ).count()
 
-    if partidas_vinculadas > 0:
+    if vinculadas > 0:
         raise ValueError(
-            f"Clube '{clube.nome_oficial}' possui {partidas_vinculadas} partida(s) vinculada(s). "
-            "Remova as partidas antes de deletar o clube."
+            f"O clube '{clube.nome_oficial}' tem {vinculadas} partida(s) "
+            "vinculada(s). Delete as partidas antes de remover o clube."
         )
 
     session.delete(clube)
@@ -119,7 +148,9 @@ def delete_clube(session: Session, clube_id: int) -> bool:
     return True
 
 
-# ─── ESTÁDIOS — READ ──────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+# ESTÁDIOS — READ
+# ════════════════════════════════════════════════════════
 
 def get_all_estadios(session: Session) -> List[Estadio]:
     return session.query(Estadio).order_by(Estadio.nome).all()
@@ -129,7 +160,9 @@ def get_estadio_by_id(session: Session, estadio_id: int) -> Optional[Estadio]:
     return session.query(Estadio).filter(Estadio.id == estadio_id).first()
 
 
-# ─── ESTÁDIOS — WRITE ─────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+# ESTÁDIOS — WRITE
+# ════════════════════════════════════════════════════════
 
 def create_estadio(session: Session, dados: EstadioCreate) -> Estadio:
     """
@@ -140,7 +173,10 @@ def create_estadio(session: Session, dados: EstadioCreate) -> Estadio:
         Estadio.nome == dados.nome
     ).first()
     if existente:
-        raise ValueError(f"Já existe um estádio com nome '{dados.nome}' (id={existente.id})")
+        raise ValueError(
+            f"Já existe um estádio com nome '{dados.nome}' "
+            f"(id={existente.id}). Use PUT /{existente.id} para atualizar."
+        )
 
     estadio = Estadio(**dados.model_dump())
     session.add(estadio)
@@ -149,7 +185,9 @@ def create_estadio(session: Session, dados: EstadioCreate) -> Estadio:
     return estadio
 
 
-def update_estadio(session: Session, estadio_id: int, dados: EstadioUpdate) -> Optional[Estadio]:
+def update_estadio(
+    session: Session, estadio_id: int, dados: EstadioUpdate
+) -> Optional[Estadio]:
     estadio = get_estadio_by_id(session, estadio_id)
     if not estadio:
         return None
@@ -163,18 +201,22 @@ def update_estadio(session: Session, estadio_id: int, dados: EstadioUpdate) -> O
 
 
 def delete_estadio(session: Session, estadio_id: int) -> bool:
+    """
+    Remove um estádio.
+    Levanta ValueError se tiver partidas vinculadas.
+    """
     estadio = get_estadio_by_id(session, estadio_id)
     if not estadio:
         return False
 
-    partidas_vinculadas = session.query(Partida).filter(
+    vinculadas = session.query(Partida).filter(
         Partida.estadio_id == estadio_id
     ).count()
 
-    if partidas_vinculadas > 0:
+    if vinculadas > 0:
         raise ValueError(
-            f"Estádio '{estadio.nome}' possui {partidas_vinculadas} partida(s) vinculada(s). "
-            "Remova as partidas antes de deletar o estádio."
+            f"O estádio '{estadio.nome}' tem {vinculadas} partida(s) "
+            "vinculada(s). Delete as partidas antes de remover o estádio."
         )
 
     session.delete(estadio)
@@ -182,7 +224,9 @@ def delete_estadio(session: Session, estadio_id: int) -> bool:
     return True
 
 
-# ─── PARTIDAS — READ ──────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+# PARTIDAS — READ
+# ════════════════════════════════════════════════════════
 
 def get_partidas(
     session: Session,
@@ -234,49 +278,60 @@ def get_partida_by_id(session: Session, partida_id: int) -> Optional[Partida]:
     )
 
 
-# ─── PARTIDAS — WRITE ─────────────────────────────────────────────────────────
+def get_todos_partida_ids(session: Session) -> List[int]:
+    """
+    Retorna todos os IDs de partidas do banco.
+    Usado pelo Cassandra para evitar ALLOW FILTERING.
+    """
+    rows = session.query(Partida.id).order_by(Partida.id).all()
+    return [r[0] for r in rows]
+
+
+# ════════════════════════════════════════════════════════
+# PARTIDAS — WRITE
+# ════════════════════════════════════════════════════════
 
 def _proximo_id_partida(session: Session) -> int:
     """
-    Gera o próximo ID de partida fora dos ranges de temporadas conhecidas,
-    para não colidir com os IDs vindos do CSV.
-    IDs do CSV vão até ~8785; começamos em 9000.
+    Gera o próximo ID de partida fora dos ranges do CSV (>= 9000),
+    para não colidir com dados históricos importados.
     """
-    from sqlalchemy import func
     max_id = session.query(func.max(Partida.id)).scalar() or 8999
     return max(max_id + 1, 9000)
 
 
 def _calcular_vencedor_id(
-    session: Session,
     placar_mandante: int,
     placar_visitante: int,
     mandante_id: int,
     visitante_id: int,
 ) -> Optional[int]:
+    """Determina o vencedor pelo placar. Retorna None em caso de empate."""
     if placar_mandante > placar_visitante:
         return mandante_id
     if placar_visitante > placar_mandante:
         return visitante_id
-    return None  # empate
+    return None
 
 
 def create_partida(session: Session, dados: PartidaCreate) -> Partida:
     """
-    Cria uma nova partida.
-    Valida que mandante, visitante e estádio existem antes de inserir.
-    Calcula vencedor_id automaticamente a partir do placar.
+    Cria uma nova partida no PostgreSQL.
+
+    - Valida que mandante, visitante e estádio existem.
+    - Calcula vencedor_id automaticamente.
+    - Atribui ID >= 9000 para não colidir com o CSV histórico.
+    - Partidas com data em 2026 entram no range TEMPORADAS[2026]
+      e aparecem na classificação do ano correto.
     """
-    # Validar FKs
     if not get_clube_by_id(session, dados.mandante_id):
-        raise ValueError(f"Clube mandante id={dados.mandante_id} não encontrado")
+        raise ValueError(f"Clube mandante id={dados.mandante_id} não encontrado.")
     if not get_clube_by_id(session, dados.visitante_id):
-        raise ValueError(f"Clube visitante id={dados.visitante_id} não encontrado")
+        raise ValueError(f"Clube visitante id={dados.visitante_id} não encontrado.")
     if not get_estadio_by_id(session, dados.estadio_id):
-        raise ValueError(f"Estádio id={dados.estadio_id} não encontrado")
+        raise ValueError(f"Estádio id={dados.estadio_id} não encontrado.")
 
     vencedor_id = _calcular_vencedor_id(
-        session,
         dados.placar_mandante,
         dados.placar_visitante,
         dados.mandante_id,
@@ -291,11 +346,14 @@ def create_partida(session: Session, dados: PartidaCreate) -> Partida:
     session.add(partida)
     session.commit()
     session.refresh(partida)
-    # Recarrega com relacionamentos
+
+    # Recarrega com todos os relacionamentos para serialização
     return get_partida_by_id(session, partida.id)
 
 
-def update_partida(session: Session, partida_id: int, dados: PartidaUpdate) -> Optional[Partida]:
+def update_partida(
+    session: Session, partida_id: int, dados: PartidaUpdate
+) -> Optional[Partida]:
     """
     Atualiza campos de uma partida.
     Recalcula vencedor_id se placar ou times forem alterados.
@@ -306,21 +364,21 @@ def update_partida(session: Session, partida_id: int, dados: PartidaUpdate) -> O
 
     campos = dados.model_dump(exclude_none=True)
 
-    # Validar FKs se informadas
+    # Valida FKs somente se foram enviadas
     if "mandante_id" in campos and not get_clube_by_id(session, campos["mandante_id"]):
-        raise ValueError(f"Clube mandante id={campos['mandante_id']} não encontrado")
+        raise ValueError(f"Clube mandante id={campos['mandante_id']} não encontrado.")
     if "visitante_id" in campos and not get_clube_by_id(session, campos["visitante_id"]):
-        raise ValueError(f"Clube visitante id={campos['visitante_id']} não encontrado")
+        raise ValueError(f"Clube visitante id={campos['visitante_id']} não encontrado.")
     if "estadio_id" in campos and not get_estadio_by_id(session, campos["estadio_id"]):
-        raise ValueError(f"Estádio id={campos['estadio_id']} não encontrado")
+        raise ValueError(f"Estádio id={campos['estadio_id']} não encontrado.")
 
     for campo, valor in campos.items():
         setattr(partida, campo, valor)
 
-    # Recalcular vencedor se placar ou times mudaram
-    if any(c in campos for c in ("placar_mandante", "placar_visitante", "mandante_id", "visitante_id")):
+    # Recalcula vencedor se algum dado de placar ou time mudou
+    campos_placar = {"placar_mandante", "placar_visitante", "mandante_id", "visitante_id"}
+    if campos_placar & set(campos):
         partida.vencedor_id = _calcular_vencedor_id(
-            session,
             partida.placar_mandante,
             partida.placar_visitante,
             partida.mandante_id,
@@ -333,10 +391,11 @@ def update_partida(session: Session, partida_id: int, dados: PartidaUpdate) -> O
 
 def delete_partida(session: Session, partida_id: int) -> bool:
     """
-    Remove uma partida pelo ID.
+    Remove uma partida do PostgreSQL.
     Retorna False se não existir.
-    ATENÇÃO: não remove automaticamente os dados no MongoDB e Cassandra —
-    isso é feito nos respectivos routers (responsabilidade do serviço chamador).
+
+    ATENÇÃO: não remove dados do MongoDB e Cassandra — isso é
+    responsabilidade do router (que faz a cascata nos 3 bancos).
     """
     partida = session.query(Partida).filter(Partida.id == partida_id).first()
     if not partida:
@@ -346,9 +405,15 @@ def delete_partida(session: Session, partida_id: int) -> bool:
     return True
 
 
-# ─── CLASSIFICAÇÃO ────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+# CLASSIFICAÇÃO
+# ════════════════════════════════════════════════════════
 
 def get_classificacao(session: Session, ano: int) -> List[dict]:
+    """
+    Calcula a tabela de classificação de uma temporada.
+    Funciona para qualquer ano em TEMPORADAS, incluindo 2026.
+    """
     q = (
         session.query(Partida)
         .options(joinedload(Partida.mandante), joinedload(Partida.visitante))
@@ -357,25 +422,26 @@ def get_classificacao(session: Session, ano: int) -> List[dict]:
 
     tabela: dict[str, dict] = {}
 
-    def iniciar_clube(nome: str):
+    def _iniciar(nome: str):
         if nome not in tabela:
             tabela[nome] = dict(
-                clube=nome, jogos=0, vitorias=0, empates=0,
-                derrotas=0, gols_pro=0, gols_contra=0,
+                clube=nome,
+                jogos=0, vitorias=0, empates=0, derrotas=0,
+                gols_pro=0, gols_contra=0,
             )
 
     for p in partidas:
         m = p.mandante.nome_oficial
         v = p.visitante.nome_oficial
-        iniciar_clube(m)
-        iniciar_clube(v)
+        _iniciar(m)
+        _iniciar(v)
 
         tabela[m]["jogos"] += 1
         tabela[v]["jogos"] += 1
-        tabela[m]["gols_pro"] += p.placar_mandante
-        tabela[m]["gols_contra"] += p.placar_visitante
-        tabela[v]["gols_pro"] += p.placar_visitante
-        tabela[v]["gols_contra"] += p.placar_mandante
+        tabela[m]["gols_pro"]     += p.placar_mandante
+        tabela[m]["gols_contra"]  += p.placar_visitante
+        tabela[v]["gols_pro"]     += p.placar_visitante
+        tabela[v]["gols_contra"]  += p.placar_mandante
 
         if p.placar_mandante > p.placar_visitante:
             tabela[m]["vitorias"] += 1
@@ -388,8 +454,8 @@ def get_classificacao(session: Session, ano: int) -> List[dict]:
             tabela[v]["empates"] += 1
 
     resultado = []
-    for clube, d in tabela.items():
-        d["pontos"] = d["vitorias"] * 3 + d["empates"]
+    for d in tabela.values():
+        d["pontos"]     = d["vitorias"] * 3 + d["empates"]
         d["saldo_gols"] = d["gols_pro"] - d["gols_contra"]
         resultado.append(d)
 
@@ -401,14 +467,22 @@ def get_classificacao(session: Session, ano: int) -> List[dict]:
     return resultado
 
 
-# ─── ANOS DISPONÍVEIS ─────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+# ANOS DISPONÍVEIS
+# ════════════════════════════════════════════════════════
 
 def get_anos_disponiveis(session: Session) -> List[int]:
+    """
+    Retorna anos que têm ao menos uma partida no banco.
+    Inclui 2026 assim que a primeira partida manual for criada.
+    """
     anos = []
     for ano, (id_min, id_max) in sorted(TEMPORADAS.items(), reverse=True):
-        existe = session.query(Partida).filter(
-            Partida.id >= id_min, Partida.id <= id_max
-        ).first()
+        existe = (
+            session.query(Partida.id)
+            .filter(Partida.id >= id_min, Partida.id <= id_max)
+            .first()
+        )
         if existe:
             anos.append(ano)
     return anos

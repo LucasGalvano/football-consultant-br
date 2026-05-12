@@ -1,3 +1,12 @@
+"""
+Router de Análises
+Classificação, artilheiros, rankings e confrontos diretos.
+
+FIX: get_artilheiros e get_ranking_cartoes sem filtro de ano agora
+buscam todos os partida_ids do PostgreSQL e os passam para o Cassandra,
+eliminando o uso de ALLOW FILTERING (full cluster scan).
+"""
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from pymongo.collection import Collection
@@ -16,7 +25,6 @@ router = APIRouter(prefix="/analises", tags=["Análises"])
     summary="Tabela de classificação de um ano",
 )
 def classificacao(ano: int, session: Session = Depends(get_postgres_session)):
-    """Calcula a classificação completa do Brasileirão para o ano informado."""
     anos_disponiveis = postgres_repo.get_anos_disponiveis(session)
     if ano not in anos_disponiveis:
         raise HTTPException(
@@ -26,39 +34,40 @@ def classificacao(ano: int, session: Session = Depends(get_postgres_session)):
     return postgres_repo.get_classificacao(session, ano)
 
 
-@router.get(
-    "/anos",
-    summary="Anos disponíveis no dataset",
-)
+@router.get("/anos", summary="Anos disponíveis no dataset")
 def anos_disponiveis(session: Session = Depends(get_postgres_session)):
     return {"anos": postgres_repo.get_anos_disponiveis(session)}
 
 
-@router.get(
-    "/artilheiros",
-    summary="Artilheiros gerais ou por ano",
-)
+@router.get("/artilheiros", summary="Artilheiros gerais ou por ano")
 def artilheiros(
     ano: Optional[int] = Query(None, description="Filtrar por ano"),
     limite: int = Query(10, ge=1, le=50),
     session: Session = Depends(get_postgres_session),
     cassandra=Depends(get_cassandra_session),
 ):
-    partida_ids = None
+    """
+    Retorna os artilheiros do período.
+    Se `ano` não for informado, considera todas as temporadas disponíveis.
+
+    FIX: eliminado ALLOW FILTERING. Os IDs das partidas são sempre
+    obtidos do PostgreSQL antes de consultar o Cassandra.
+    """
     if ano:
-        _, partidas = postgres_repo.get_partidas(session, ano=ano, por_pagina=10000)
+        _, partidas = postgres_repo.get_partidas(session, ano=ano, por_pagina=10_000)
+        if not partidas:
+            raise HTTPException(status_code=404, detail=f"Nenhuma partida encontrada para {ano}")
         partida_ids = [p.id for p in partidas]
-        print(f"DEBUG ano={ano} partida_ids count={len(partida_ids)} exemplo={partida_ids[:3]}")
-        if not partida_ids:
-            raise HTTPException(status_code=404, detail=f"Nenhuma partida encontrada para o ano {ano}")
+    else:
+        # Sem filtro de ano: busca todos os IDs disponíveis do Postgres
+        # Isso substitui o ALLOW FILTERING anterior
+        _, todas = postgres_repo.get_partidas(session, por_pagina=10_000)
+        partida_ids = [p.id for p in todas]
 
     return cassandra_repo.get_artilheiros(cassandra, limite=limite, partida_ids=partida_ids)
 
 
-@router.get(
-    "/ranking-cartoes",
-    summary="Ranking de jogadores com mais cartões",
-)
+@router.get("/ranking-cartoes", summary="Ranking de jogadores com mais cartões")
 def ranking_cartoes(
     ano: Optional[int] = Query(None),
     tipo: Optional[str] = Query(None, description="Amarelo ou Vermelho"),
@@ -69,10 +78,12 @@ def ranking_cartoes(
     if tipo and tipo not in ("Amarelo", "Vermelho"):
         raise HTTPException(status_code=400, detail="Tipo deve ser 'Amarelo' ou 'Vermelho'")
 
-    partida_ids = None
     if ano:
-        _, partidas = postgres_repo.get_partidas(session, ano=ano, por_pagina=10000)
+        _, partidas = postgres_repo.get_partidas(session, ano=ano, por_pagina=10_000)
         partida_ids = [p.id for p in partidas]
+    else:
+        _, todas = postgres_repo.get_partidas(session, por_pagina=10_000)
+        partida_ids = [p.id for p in todas]
 
     return cassandra_repo.get_ranking_cartoes(
         cassandra, limite=limite, partida_ids=partida_ids, tipo=tipo
@@ -81,7 +92,7 @@ def ranking_cartoes(
 
 @router.get(
     "/clube/{clube_id}/estatisticas",
-    summary="Médias de desempenho de um clube",
+    summary="Médias de desempenho de um clube (MongoDB)",
 )
 def estatisticas_clube(
     clube_id: int,
@@ -91,7 +102,6 @@ def estatisticas_clube(
     clube = postgres_repo.get_clube_by_id(session, clube_id)
     if not clube:
         raise HTTPException(status_code=404, detail="Clube não encontrado")
-
     return mongo_repo.get_media_estatisticas_clube(mongo_col, clube.nome_oficial)
 
 
@@ -112,14 +122,17 @@ def confronto_direto(
     if not clube2:
         raise HTTPException(status_code=404, detail=f"Clube {clube2_id} não encontrado")
 
-    # Histórico de partidas
-    from sqlalchemy import or_, extract
+    from sqlalchemy import or_
     from app.models.postgres_models import Partida
     from sqlalchemy.orm import joinedload
 
     partidas = (
         session.query(Partida)
-        .options(joinedload(Partida.mandante), joinedload(Partida.visitante), joinedload(Partida.estadio))
+        .options(
+            joinedload(Partida.mandante),
+            joinedload(Partida.visitante),
+            joinedload(Partida.estadio),
+        )
         .filter(
             or_(
                 (Partida.mandante_id == clube1.id) & (Partida.visitante_id == clube2.id),
@@ -130,30 +143,30 @@ def confronto_direto(
         .all()
     )
 
-    vitórias_c1 = sum(
+    vitorias_c1 = sum(
         1 for p in partidas
         if (p.mandante_id == clube1.id and p.placar_mandante > p.placar_visitante)
         or (p.visitante_id == clube1.id and p.placar_visitante > p.placar_mandante)
     )
-    vitórias_c2 = sum(
+    vitorias_c2 = sum(
         1 for p in partidas
         if (p.mandante_id == clube2.id and p.placar_mandante > p.placar_visitante)
         or (p.visitante_id == clube2.id and p.placar_visitante > p.placar_mandante)
     )
-    empates = len(partidas) - vitórias_c1 - vitórias_c2
+    empates = len(partidas) - vitorias_c1 - vitorias_c2
 
-    historico = []
-    for p in partidas[:20]:  # últimas 20
-        historico.append({
+    historico = [
+        {
             "id": p.id,
             "data": p.data,
             "mandante": p.mandante.nome_oficial,
             "visitante": p.visitante.nome_oficial,
             "placar": f"{p.placar_mandante}x{p.placar_visitante}",
             "estadio": p.estadio.nome,
-        })
+        }
+        for p in partidas[:20]
+    ]
 
-    # Estatísticas MongoDB
     stats = mongo_repo.get_confronto_direto_stats(
         mongo_col, clube1.nome_oficial, clube2.nome_oficial
     )
@@ -162,8 +175,8 @@ def confronto_direto(
         "clube1": clube1.nome_oficial,
         "clube2": clube2.nome_oficial,
         "total_jogos": len(partidas),
-        f"vitorias_{clube1.sigla}": vitórias_c1,
-        f"vitorias_{clube2.sigla}": vitórias_c2,
+        f"vitorias_{clube1.sigla}": vitorias_c1,
+        f"vitorias_{clube2.sigla}": vitorias_c2,
         "empates": empates,
         "historico_recente": historico,
         "estatisticas_detalhadas": stats[:10],

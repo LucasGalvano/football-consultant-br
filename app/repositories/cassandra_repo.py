@@ -2,15 +2,15 @@
 Repository Cassandra / AstraDB
 CRUD completo para gols_por_partida e cartoes_por_partida.
 
-BUGS CORRIGIDOS:
-- get_artilheiros e get_ranking_cartoes sem partida_ids usavam
-  ALLOW FILTERING (full cluster scan em todo o cluster).
-  Agora a função retorna lista vazia se partida_ids não for passado —
-  o router é responsável por sempre fornecer a lista vinda do Postgres.
+PROTEÇÃO HISTÓRICA:
+  Partidas com ID <= 8785 (temporadas até 2024, vindas dos CSVs) são
+  imutáveis — delete e update são bloqueados com HistoricalDataError.
+  Apenas partidas criadas via API (ID >= 9000) podem ser modificadas.
 
-WRITES ADICIONADOS:
-- create_gol / delete_gol / delete_gols_partida
-- create_cartao / delete_cartoes_partida
+ALTERAÇÕES v2:
+  - Gap 1 corrigido: delete_gol individual agora exposto via função pública.
+  - Gap 2 adicionado: update_gol e update_cartao (delete + insert).
+  - Constante ULTIMO_ID_HISTORICO centraliza o limite de proteção.
 """
 
 from cassandra.cluster import Session as CassandraSession
@@ -22,11 +22,41 @@ from app.schemas.inputs import GolCreate, CartaoCreate
 
 
 # ════════════════════════════════════════════════════════
+# PROTEÇÃO DE DADOS HISTÓRICOS
+# ════════════════════════════════════════════════════════
+
+# IDs vindos dos CSVs do dataset público (temporadas 2014–2024).
+# Qualquer operação de escrita/delete sobre essas partidas é bloqueada.
+ULTIMO_ID_HISTORICO = 8785
+
+
+class HistoricalDataError(ValueError):
+    """Lançada ao tentar modificar uma partida histórica (CSV 2014–2024)."""
+    pass
+
+
+def _verificar_protecao_historica(partida_id: int, operacao: str = "modificar") -> None:
+    """
+    Levanta HistoricalDataError se partida_id pertence ao dataset histórico.
+
+    Args:
+        partida_id: ID da partida alvo.
+        operacao: Descrição da operação para mensagem de erro ("deletar", "editar"…).
+    """
+    if partida_id <= ULTIMO_ID_HISTORICO:
+        raise HistoricalDataError(
+            f"Não é permitido {operacao} dados históricos. "
+            f"A partida {partida_id} faz parte do dataset oficial (2014–2024, "
+            f"IDs até {ULTIMO_ID_HISTORICO}). "
+            "Apenas partidas criadas via API (ID >= 9000) podem ser alteradas."
+        )
+
+
+# ════════════════════════════════════════════════════════
 # HELPERS INTERNOS
 # ════════════════════════════════════════════════════════
 
 def _buscar_gols_partida(session: CassandraSession, partida_id: int) -> List:
-    """Busca gols de uma partida pela partition key — sem ALLOW FILTERING."""
     rows = session.execute(
         "SELECT atleta, clube, tipo_gol "
         "FROM gols_por_partida WHERE partida_id = %s",
@@ -36,7 +66,6 @@ def _buscar_gols_partida(session: CassandraSession, partida_id: int) -> List:
 
 
 def _buscar_cartoes_partida(session: CassandraSession, partida_id: int) -> List:
-    """Busca cartões de uma partida pela partition key — sem ALLOW FILTERING."""
     rows = session.execute(
         "SELECT atleta, tipo_cartao, clube "
         "FROM cartoes_por_partida WHERE partida_id = %s",
@@ -46,7 +75,6 @@ def _buscar_cartoes_partida(session: CassandraSession, partida_id: int) -> List:
 
 
 def _clube_principal(clubes_contagem: dict) -> str:
-    """Retorna o clube onde o atleta teve mais registros no período."""
     if not clubes_contagem:
         return ""
     return max(clubes_contagem, key=clubes_contagem.get)
@@ -68,6 +96,25 @@ def get_gols_partida(
     return [dict(r._asdict()) for r in rows]
 
 
+def get_gol_individual(
+    session: CassandraSession,
+    partida_id: int,
+    minuto: int,
+    atleta: str,
+) -> Optional[dict]:
+    """
+    Retorna um gol específico pela chave completa (partida_id, minuto, atleta).
+    Retorna None se não existir.
+    """
+    row = session.execute(
+        "SELECT partida_id, minuto, atleta, clube, tipo_gol, rodada "
+        "FROM gols_por_partida "
+        "WHERE partida_id = %s AND minuto = %s AND atleta = %s",
+        (partida_id, minuto, atleta),
+    ).one()
+    return dict(row._asdict()) if row else None
+
+
 def get_artilheiros(
     session: CassandraSession,
     limite: int = 10,
@@ -76,12 +123,7 @@ def get_artilheiros(
     """
     Retorna os artilheiros ordenados por total de gols.
     Gols contra são excluídos da contagem.
-
-    IMPORTANTE: partida_ids deve sempre ser fornecido pelo router
-    (obtido do PostgreSQL). Se vier vazio ou None, retorna lista vazia
-    em vez de fazer ALLOW FILTERING no cluster inteiro.
-
-    Usa ThreadPoolExecutor para buscar múltiplas partitions em paralelo.
+    partida_ids deve sempre ser fornecido pelo router (obtido do PostgreSQL).
     """
     if not partida_ids:
         return []
@@ -102,7 +144,7 @@ def get_artilheiros(
                         contagem[r.atleta]["total_gols"] += 1
                         contagem[r.atleta]["clubes"][r.clube] += 1
             except Exception:
-                pass  # partition indisponível não derruba o resultado todo
+                pass
 
     resultado = [
         {
@@ -121,7 +163,6 @@ def get_gols_clube_partidas(
     clube: str,
     partida_ids: List[int],
 ) -> List[dict]:
-    """Retorna gols de um clube específico num conjunto de partidas."""
     resultado = []
     for pid in partida_ids:
         rows = session.execute(
@@ -151,20 +192,33 @@ def get_cartoes_partida(
     return [dict(r._asdict()) for r in rows]
 
 
+def get_cartao_individual(
+    session: CassandraSession,
+    partida_id: int,
+    minuto: int,
+    atleta: str,
+    tipo_cartao: str,
+) -> Optional[dict]:
+    """
+    Retorna um cartão específico pela chave completa
+    (partida_id, minuto, atleta, tipo_cartao).
+    Retorna None se não existir.
+    """
+    row = session.execute(
+        "SELECT partida_id, minuto, atleta, tipo_cartao, clube, posicao, rodada "
+        "FROM cartoes_por_partida "
+        "WHERE partida_id = %s AND minuto = %s AND atleta = %s AND tipo_cartao = %s",
+        (partida_id, minuto, atleta, tipo_cartao),
+    ).one()
+    return dict(row._asdict()) if row else None
+
+
 def get_ranking_cartoes(
     session: CassandraSession,
     limite: int = 10,
     partida_ids: Optional[List[int]] = None,
     tipo: Optional[str] = None,
 ) -> List[dict]:
-    """
-    Retorna ranking de jogadores por cartões.
-
-    Mesmo comportamento de get_artilheiros: partida_ids vem do Postgres,
-    nunca usa ALLOW FILTERING.
-
-    tipo: "Amarelo", "Vermelho" ou None (ordena por total).
-    """
     if not partida_ids:
         return []
 
@@ -190,10 +244,10 @@ def get_ranking_cartoes(
 
     resultado = [
         {
-            "atleta":       atleta,
-            "clube":        _clube_principal(dados["clubes"]),
-            "amarelos":     dados["amarelos"],
-            "vermelhos":    dados["vermelhos"],
+            "atleta":        atleta,
+            "clube":         _clube_principal(dados["clubes"]),
+            "amarelos":      dados["amarelos"],
+            "vermelhos":     dados["vermelhos"],
             "total_cartoes": dados["amarelos"] + dados["vermelhos"],
         }
         for atleta, dados in contagem.items()
@@ -219,13 +273,11 @@ def create_gol(
     dados: GolCreate,
 ) -> dict:
     """
-    Insere um gol na tabela gols_por_partida.
-
-    PRIMARY KEY: (partida_id, minuto, atleta)
-    Se o mesmo atleta marcar dois gols no mesmo minuto, o segundo
-    sobrescreve o primeiro (limitação do modelo; minutos de acréscimo
-    já somados evitam a maioria dos casos — 45+2 → informe 47).
+    Insere um gol.
+    Bloqueado para partidas históricas (ID <= ULTIMO_ID_HISTORICO).
     """
+    _verificar_protecao_historica(partida_id, "adicionar gols em")
+
     stmt = session.prepare(
         "INSERT INTO gols_por_partida "
         "(partida_id, minuto, atleta, clube, tipo_gol, rodada) "
@@ -249,6 +301,30 @@ def create_gol(
     }
 
 
+def update_gol(
+    session: CassandraSession,
+    partida_id: int,
+    minuto_original: int,
+    atleta_original: str,
+    dados: GolCreate,
+) -> Optional[dict]:
+    """
+    Atualiza um gol via delete + insert (padrão Cassandra).
+    Retorna None se o gol original não existir.
+    Bloqueado para partidas históricas.
+
+    Se a chave mudar (minuto ou atleta diferentes), o registro antigo
+    é removido e um novo é criado com a nova chave.
+    """
+    _verificar_protecao_historica(partida_id, "editar gols de")
+
+    existia = delete_gol(session, partida_id, minuto_original, atleta_original)
+    if not existia:
+        return None
+
+    return create_gol(session, partida_id, dados)
+
+
 def delete_gol(
     session: CassandraSession,
     partida_id: int,
@@ -257,9 +333,11 @@ def delete_gol(
 ) -> bool:
     """
     Remove um gol específico pela chave composta (partida_id, minuto, atleta).
-    Retorna True se havia o registro, False se não existia.
+    Retorna True se existia, False se não encontrou.
+    Bloqueado para partidas históricas.
     """
-    # Verifica existência antes de deletar (Cassandra não retorna affected rows)
+    _verificar_protecao_historica(partida_id, "deletar gols de")
+
     existia = session.execute(
         "SELECT atleta FROM gols_por_partida "
         "WHERE partida_id = %s AND minuto = %s AND atleta = %s",
@@ -281,10 +359,12 @@ def delete_gols_partida(
     session: CassandraSession, partida_id: int
 ) -> int:
     """
-    Remove TODOS os gols de uma partida (DELETE by partition key).
-    Retorna a quantidade de gols removidos.
-    Operação eficiente — bate em apenas uma partition.
+    Remove TODOS os gols de uma partida.
+    Bloqueado para partidas históricas.
+    Retorna a quantidade removida.
     """
+    _verificar_protecao_historica(partida_id, "deletar gols de")
+
     existentes = get_gols_partida(session, partida_id)
     count = len(existentes)
     if count > 0:
@@ -305,12 +385,11 @@ def create_cartao(
     dados: CartaoCreate,
 ) -> dict:
     """
-    Insere um cartão na tabela cartoes_por_partida.
-
-    PRIMARY KEY: (partida_id, minuto, atleta, tipo_cartao)
-    Suporta o caso de um jogador receber amarelo e vermelho na mesma
-    partida (tipo_cartao entra na chave).
+    Insere um cartão.
+    Bloqueado para partidas históricas.
     """
+    _verificar_protecao_historica(partida_id, "adicionar cartões em")
+
     stmt = session.prepare(
         "INSERT INTO cartoes_por_partida "
         "(partida_id, minuto, atleta, tipo_cartao, clube, posicao, rodada) "
@@ -336,13 +415,74 @@ def create_cartao(
     }
 
 
+def update_cartao(
+    session: CassandraSession,
+    partida_id: int,
+    minuto_original: int,
+    atleta_original: str,
+    tipo_cartao_original: str,
+    dados: CartaoCreate,
+) -> Optional[dict]:
+    """
+    Atualiza um cartão via delete + insert.
+    Retorna None se o cartão original não existir.
+    Bloqueado para partidas históricas.
+    """
+    _verificar_protecao_historica(partida_id, "editar cartões de")
+
+    existia = delete_cartao_individual(
+        session, partida_id, minuto_original, atleta_original, tipo_cartao_original
+    )
+    if not existia:
+        return None
+
+    return create_cartao(session, partida_id, dados)
+
+
+def delete_cartao_individual(
+    session: CassandraSession,
+    partida_id: int,
+    minuto: int,
+    atleta: str,
+    tipo_cartao: str,
+) -> bool:
+    """
+    Remove um cartão específico pela chave completa
+    (partida_id, minuto, atleta, tipo_cartao).
+    Retorna True se existia, False caso contrário.
+    Bloqueado para partidas históricas.
+    """
+    _verificar_protecao_historica(partida_id, "deletar cartões de")
+
+    existia = session.execute(
+        "SELECT atleta FROM cartoes_por_partida "
+        "WHERE partida_id = %s AND minuto = %s "
+        "AND atleta = %s AND tipo_cartao = %s",
+        (partida_id, minuto, atleta, tipo_cartao),
+    ).one()
+
+    if not existia:
+        return False
+
+    session.execute(
+        "DELETE FROM cartoes_por_partida "
+        "WHERE partida_id = %s AND minuto = %s "
+        "AND atleta = %s AND tipo_cartao = %s",
+        (partida_id, minuto, atleta, tipo_cartao),
+    )
+    return True
+
+
 def delete_cartoes_partida(
     session: CassandraSession, partida_id: int
 ) -> int:
     """
     Remove TODOS os cartões de uma partida.
+    Bloqueado para partidas históricas.
     Retorna a quantidade removida.
     """
+    _verificar_protecao_historica(partida_id, "deletar cartões de")
+
     existentes = get_cartoes_partida(session, partida_id)
     count = len(existentes)
     if count > 0:
